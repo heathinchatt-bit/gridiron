@@ -1,0 +1,72 @@
+name: Send Gridiron Results
+
+on:
+  schedule:
+    # Two UTC times to cover DST/non-DST so we can check America/New_York local time
+    - cron: '0 12 * * 1'  # 12:00 UTC (8:00 EDT when DST is in effect)
+    - cron: '0 13 * * 1'  # 13:00 UTC (8:00 EST when standard time is in effect)
+  workflow_dispatch:
+    inputs:
+      test_recipient:
+        description: 'Email address to send a test message to (optional).'
+        required: false
+        default: 'heathinchatt@gmail.com'
+
+jobs:
+  send_results:
+    name: Run send-results.js at 08:00 America/New_York
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify New York local time is Monday 08:00
+        run: |
+          NY_HOUR=$(TZ="America/New_York" date +'%H')
+          NY_DOW=$(TZ="America/New_York" date +'%u') # 1..7 (Mon..Sun)
+          echo "New York local time: hour=$NY_HOUR day_of_week=$NY_DOW"
+          # Proceed only if it's Monday (1) and 08 hour
+          if [ "$NY_DOW" -ne 1 ] || [ "$NY_HOUR" -ne 8 ]; then
+            echo "Not target New York time; exiting without running script."
+            exit 0
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          else
+            npm install firebase-admin --no-save
+          fi
+
+      - name: Run script
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: node scripts/send-results.js
+
+  send_test:
+    name: Send test email (manual dispatch only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Send test email via Resend
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TEST_RECIPIENT: ${{ github.event.inputs.test_recipient }}
+        run: |
+          if [ -z "$TEST_RECIPIENT" ]; then
+            echo "No test_recipient provided, skipping.";
+            exit 0;
+          fi
+          echo "Sending test email to $TEST_RECIPIENT..."
+          node -e "(async ()=>{const res=await fetch('https://api.resend.com/emails',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.RESEND_API_KEY},body:JSON.stringify({from:'Gridiron Picks <onboarding@resend.dev>',to:[process.env.TEST_RECIPIENT],subject:'Gridiron Picks — Test Email',text:'This is a test email from the Gridiron workflow.'})}); const txt=await res.text(); console.log('Resend response:',txt); if(!res.ok){process.exit(2);} })();"
