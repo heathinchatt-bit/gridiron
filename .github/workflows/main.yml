@@ -1,6 +1,6 @@
 name: Send Gridiron Results
 
-on:
+/*on:
   schedule:
     # Two UTC cron times so we can check America/New_York local time and respect DST
     - cron: '0 12 * * 1'  # 12:00 UTC (8:00 AM EDT when DST is in effect)
@@ -14,7 +14,7 @@ on:
       dry_run:
         description: 'If "true" the script will only print the payload; set to "false" to actually send.'
         required: false
-        default: 'true'
+        default: 'true'*/
 
 jobs:
   send_results:
