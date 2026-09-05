@@ -2,7 +2,10 @@ import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
 // Initialize Firebase Admin using GitHub secret
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+if (!Object.keys(serviceAccount).length) {
+  console.warn('FIREBASE_SERVICE_ACCOUNT not provided or empty — Firestore reads will likely fail in this run.');
+}
 initializeApp({ credential: cert(serviceAccount) });
 const db = getFirestore();
 const COLLECTION = "gridironStore";
@@ -94,6 +97,37 @@ async function run() {
         leaderboardText += `${idx + 1}. ${name} — ${r.correct}/${r.attempted} correct (${pct}%)\n`;
       });
 
+    // Build email payload (previewable)
+    const defaultTo = ['delivered@resend.dev']; // safe test recipient required by Resend until domain verified
+    const testRecipient = process.env.TEST_RECIPIENT && process.env.TEST_RECIPIENT.trim() ? process.env.TEST_RECIPIENT.trim() : null;
+
+    const payload = {
+      from: 'Gridiron Picks <onboarding@resend.dev>',
+      to: testRecipient ? [testRecipient] : defaultTo,
+      // only BCC participants when not sending to a single test recipient
+      bcc: testRecipient ? [] : emails,
+      subject: `Gridiron Picks — Week ${targetWeek} Results & Standings`,
+      text:
+        `Gridiron Picks Weekly Results - Week ${targetWeek}\n\n` +
+        `Week Winner(s): ${winners.length ? winners.join(", ") : "None"}\n\n` +
+        `Leaderboard:\n${leaderboardText}`,
+      html:
+        `<p>Gridiron Picks Weekly Results - Week ${targetWeek}</p>` +
+        `<p><strong>Week Winner(s):</strong> ${winners.length ? winners.join(", ") : "None"}</p>` +
+        `<pre style="font-family: monospace;">${leaderboardText.replace(/</g, '&lt;')}</pre>`
+    };
+
+    // Print preview to logs
+    console.log('=== Email payload preview ===');
+    console.log(JSON.stringify(payload, null, 2));
+    console.log('=== End preview ===');
+
+    const dry = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
+    if (dry) {
+      console.log('DRY_RUN enabled — skipping actual send.');
+      return;
+    }
+
     // 5. Send via Resend API
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -101,21 +135,13 @@ async function run() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
       },
-      body: JSON.stringify({
-        from: 'Gridiron Picks <onboarding@resend.dev>',
-        to: ['delivered@resend.dev'], // Resend testing restriction, replace with participants when domain verified
-        bcc: emails,
-        subject: `Gridiron Picks — Week ${targetWeek} Results & Standings`,
-        text: `Gridiron Picks Weekly Results - Week ${targetWeek}\n\n` +
-              `Week Winner(s): ${winners.length ? winners.join(", ") : "None"}\n\n` +
-              `Leaderboard:\n${leaderboardText}`
-      })
+      body: JSON.stringify(payload)
     });
 
     const data = await res.json();
-    console.log("Email dispatch response:", data);
+    console.log('Email dispatch response:', data);
   } catch (err) {
-    console.error("Automation error:", err);
+    console.error('Automation error:', err);
     process.exit(1);
   }
 }
