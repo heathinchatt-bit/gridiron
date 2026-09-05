@@ -12,13 +12,13 @@ on:
         required: false
         default: ''
       dry_run:
-        description: 'If "true" the script will only print the payload; set to "false" to actually send.'
+        description: 'If "true" the script will only print the payload; set to "false" to actually send (manual only).'
         required: false
         default: 'true'
 
 jobs:
   send_results:
-    name: Run send-results.js //at 08:00 America/New_York (or manual)
+    name: Run send-results.js (scheduled + manual)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +55,7 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          # For manual runs use the input dry_run; for scheduled runs default to 'false' (actually send)
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           TEST_RECIPIENT: ${{ github.event.inputs.test_recipient }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: node scripts/send-results.js
