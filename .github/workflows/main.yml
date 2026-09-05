@@ -2,9 +2,8 @@ name: Send Gridiron Results
 
 on:
   schedule:
-    # Two UTC cron times so we can check America/New_York local time and respect DST
-    - cron: '0 12 * * 1'  # 12:00 UTC (8:00 AM EDT when DST is in effect)
-    - cron: '0 13 * * 1'  # 13:00 UTC (8:00 AM EST when standard time is in effect)
+    - cron: '0 12 * * 1'
+    - cron: '0 13 * * 1'
   workflow_dispatch:
     inputs:
       test_recipient:
@@ -18,7 +17,6 @@ on:
 
 jobs:
   send_results:
-    name: Run send-results.js (scheduled + manual)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +27,6 @@ jobs:
             NY_HOUR=$(TZ="America/New_York" date +'%H')
             NY_DOW=$(TZ="America/New_York" date +'%u') # 1..7 (Mon..Sun)
             echo "New York local time: hour=$NY_HOUR day_of_week=$NY_DOW"
-            # Proceed only if it's Monday (1) and 08 hour
             if [ "$NY_DOW" -ne 1 ] || [ "$NY_HOUR" -ne 8 ]; then
               echo "Not target New York time; exiting without running script."
               exit 0
@@ -55,7 +52,11 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          # For manual runs use the input dry_run; for scheduled runs default to 'false' (actually send)
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           TEST_RECIPIENT: ${{ github.event.inputs.test_recipient }}
-        run: node scripts/send-results.js
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          # For scheduled runs, force DRY_RUN to false so scheduled runs actually send
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            export DRY_RUN=false
+          fi
+          node scripts/send-results.js
