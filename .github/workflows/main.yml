@@ -1,10 +1,10 @@
 name: Send Gridiron Results
 
-on:
+/*on:
   schedule:
     # Two UTC cron times so we can check America/New_York local time and respect DST
-    - cron: '30 21 * * 5'  # 12:00 UTC (8:00 AM EDT when DST is in effect)
-    - cron: '0 13 * * 1'  # 13:00 UTC (8:00 AM EST when standard time is in effect)
+    - cron: '0 12 * * 1'  # 12:00 UTC (8:00 AM EDT when DST is in effect)
+    - cron: '0 13 * * 1' */ # 13:00 UTC (8:00 AM EST when standard time is in effect)
   workflow_dispatch:
     inputs:
       test_recipient:
