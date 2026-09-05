@@ -18,7 +18,7 @@ name: Send Gridiron Results
 
 jobs:
   send_results:
-    name: Run send-results.js at 08:00 America/New_York (or manual)
+    name: Run send-results.js //at 08:00 America/New_York (or manual)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
             NY_HOUR=$(TZ="America/New_York" date +'%H')
             NY_DOW=$(TZ="America/New_York" date +'%u') # 1..7 (Mon..Sun)
             echo "New York local time: hour=$NY_HOUR day_of_week=$NY_DOW"
-            # Proceed only if it's Monday (1) and 08 hour
+            //# Proceed only if it's Monday (1) and 08 hour
             if [ "$NY_DOW" -ne 1 ] || [ "$NY_HOUR" -ne 8 ]; then
               echo "Not target New York time; exiting without running script."
               exit 0
