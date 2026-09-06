@@ -2,10 +2,7 @@ import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
 // Initialize Firebase Admin using GitHub secret
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-if (!Object.keys(serviceAccount).length) {
-  console.warn('FIREBASE_SERVICE_ACCOUNT not provided or empty — Firestore reads will likely fail in this run.');
-}
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 initializeApp({ credential: cert(serviceAccount) });
 const db = getFirestore();
 const COLLECTION = "gridironStore";
@@ -14,19 +11,85 @@ async function run() {
   try {
     // 1. Get current week metadata
     const metaDoc = await db.collection(COLLECTION).doc("gp-meta").get();
-    if (!metaDoc.exists) return;
+    if (!metaDoc.exists) {
+      console.log("Meta document not found.");
+      return;
+    }
     const meta = metaDoc.data().value;
     const currentWeek = meta.currentWeek;
     const targetWeek = currentWeek > 1 ? currentWeek - 1 : currentWeek;
+    console.log(`Processing Week ${targetWeek} (Current week is ${currentWeek})...`);
 
-    // 2. Fetch games and check if graded
-    const gamesDoc = await db.collection(COLLECTION).doc(`gp-games-${targetWeek}`).get();
-    if (!gamesDoc.exists) return;
+    // 2. Fetch games from Firestore
+    const gamesDocRef = db.collection(COLLECTION).doc(`gp-games-${targetWeek}`);
+    const gamesDoc = await gamesDocRef.get();
+    if (!gamesDoc.exists) {
+      console.log(`Games document gp-games-${targetWeek} not found.`);
+      return;
+    }
     const gamesData = gamesDoc.data().value;
-    const games = Array.isArray(gamesData) ? gamesData : (gamesData.games || []);
+    let games = Array.isArray(gamesData) ? gamesData : (gamesData.games || []);
 
+    // 3. Automatically fetch latest scores from ESPN API
+    try {
+      console.log(`Fetching latest scores from ESPN for Week ${targetWeek}...`);
+      const espnRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?week=${targetWeek}&seasontype=2&limit=300`);
+      const espnData = await espnRes.json();
+      
+      if (espnData && espnData.events) {
+        let scoresUpdated = false;
+        
+        games = games.map(game => {
+          const matchingEvent = espnData.events.find(event => {
+            const competition = event.competitions[0];
+            const homeCompetitor = competition.competitors.find(c => c.homeAway === 'home');
+            const awayCompetitor = competition.competitors.find(c => c.homeAway === 'away');
+            
+            const homeName = homeCompetitor.team.displayName.toLowerCase();
+            const awayName = awayCompetitor.team.displayName.toLowerCase();
+            const homeShort = homeCompetitor.team.shortDisplayName.toLowerCase();
+            const awayShort = awayCompetitor.team.shortDisplayName.toLowerCase();
+            
+            const gHome = (game.homeTeam || "").toLowerCase();
+            const gAway = (game.awayTeam || "").toLowerCase();
+            
+            return (gHome.includes(homeName) || homeName.includes(gHome) || gHome.includes(homeShort)) &&
+                   (gAway.includes(awayName) || awayName.includes(gAway) || gAway.includes(awayShort));
+          });
+
+          if (matchingEvent) {
+            const competition = matchingEvent.competitions[0];
+            const homeCompetitor = competition.competitors.find(c => c.homeAway === 'home');
+            const awayCompetitor = competition.competitors.find(c => c.homeAway === 'away');
+            
+            const homeScore = parseInt(homeCompetitor.score, 10);
+            const awayScore = parseInt(awayCompetitor.score, 10);
+            const isFinal = competition.status.type.completed;
+
+            if (!isNaN(homeScore) && !isNaN(awayScore) && (isFinal || homeScore > 0 || awayScore > 0)) {
+              if (game.homeScore !== homeScore || game.awayScore !== awayScore) {
+                game.homeScore = homeScore;
+                game.awayScore = awayScore;
+                scoresUpdated = true;
+              }
+            }
+          }
+          return game;
+        });
+
+        if (scoresUpdated) {
+          const updatedValue = Array.isArray(gamesData) ? games : { ...gamesData, games };
+          await gamesDocRef.set({ value: updatedValue }, { merge: true });
+          console.log("Successfully synced latest ESPN scores to Firestore.");
+        }
+      }
+    } catch (espnErr) {
+      console.warn("Could not fetch from ESPN API, falling back to existing Firestore scores:", espnErr.message);
+    }
+
+    // 4. Verify if target week is fully graded
     const gameWinner = (g) => {
-      if (g.awayScore == null || g.homeScore == null) return null;
+      if (g.awayScore == null || g.homeScore == null || isNaN(g.awayScore) || isNaN(g.homeScore)) return null;
       if (g.awayScore > g.homeScore) return "away";
       if (g.homeScore > g.awayScore) return "home";
       return null;
@@ -34,18 +97,21 @@ async function run() {
 
     const totalGames = games.length;
     const gamesGraded = games.filter((g) => gameWinner(g)).length;
+    console.log(`Graded games: ${gamesGraded}/${totalGames}`);
+    
     if (gamesGraded !== totalGames || totalGames === 0) {
-      console.log(`Week ${targetWeek} is not fully graded. Skipping email.`);
+      console.log(`Week ${targetWeek} is not fully graded yet. Skipping email.`);
       return;
     }
 
-    // 3. Fetch participants and picks
+    // 5. Fetch participants and picks
     const participantsSnap = await db.collection(COLLECTION).doc("gp-participants").get();
     const participants = participantsSnap.exists ? participantsSnap.data().value : [];
+    
     const picksDoc = await db.collection(COLLECTION).doc(`gp-picks-${targetWeek}`).get();
     const picks = picksDoc.exists ? picksDoc.data().value : {};
 
-    // 4. Calculate scores
+    // 6. Calculate scores and determine winner(s)
     const rows = {};
     participants.forEach(({ name }) => {
       const rec = picks[name] || { locked: false, answers: {} };
@@ -53,7 +119,7 @@ async function run() {
       let correct = 0;
       let attempted = 0;
       let scoreError = 0;
-
+      
       games.forEach((g, index) => {
         const winner = gameWinner(g);
         if (!winner) return;
@@ -64,7 +130,7 @@ async function run() {
         }
         if (index === 0) {
           if (p && p.awayScore != null && p.homeScore != null) {
-            scoreError += Math.abs(p.awayScore - g.awayScore) + Math.abs(p.homeScore - g.homeScore);
+            scoreError += Math.abs(Number(p.awayScore) - Number(g.awayScore)) + Math.abs(Number(p.homeScore) - Number(g.homeScore));
           } else {
             scoreError += 50;
           }
@@ -87,7 +153,10 @@ async function run() {
     }
 
     const emails = participants.map(p => p.email).filter(Boolean);
-    if (emails.length === 0) return;
+    if (emails.length === 0) {
+      console.log("No recipient emails found.");
+      return;
+    }
 
     let leaderboardText = "";
     Object.entries(rows)
@@ -97,51 +166,28 @@ async function run() {
         leaderboardText += `${idx + 1}. ${name} — ${r.correct}/${r.attempted} correct (${pct}%)\n`;
       });
 
-    // Build email payload (previewable)
-    const defaultTo = ['delivered@resend.dev']; // safe test recipient required by Resend until domain verified
-    const testRecipient = process.env.TEST_RECIPIENT && process.env.TEST_RECIPIENT.trim() ? process.env.TEST_RECIPIENT.trim() : null;
-
-    const payload = {
-      from: 'Gridiron Picks <onboarding@resend.dev>',
-      to: testRecipient ? [testRecipient] : defaultTo,
-      // only BCC participants when not sending to a single test recipient
-      bcc: testRecipient ? [] : emails,
-      subject: `Gridiron Picks — Week ${targetWeek} Results & Standings`,
-      text:
-        `Gridiron Picks Weekly Results - Week ${targetWeek}\n\n` +
-        `Week Winner(s): ${winners.length ? winners.join(", ") : "None"}\n\n` +
-        `Leaderboard:\n${leaderboardText}`,
-      html:
-        `<p>Gridiron Picks Weekly Results - Week ${targetWeek}</p>` +
-        `<p><strong>Week Winner(s):</strong> ${winners.length ? winners.join(", ") : "None"}</p>` +
-        `<pre style="font-family: monospace;">${leaderboardText.replace(/</g, '&lt;')}</pre>`
-    };
-
-    // Print preview to logs
-    console.log('=== Email payload preview ===');
-    console.log(JSON.stringify(payload, null, 2));
-    console.log('=== End preview ===');
-
-    const dry = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
-    if (dry) {
-      console.log('DRY_RUN enabled — skipping actual send.');
-      return;
-    }
-
-    // 5. Send via Resend API
+    // 7. Send via Resend API
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        from: 'Gridiron Picks <onboarding@resend.dev>',
+        to: ['delivered@resend.dev'], // Switch to participants when your domain is verified in Resend
+        bcc: emails,
+        subject: `Gridiron Picks — Week ${targetWeek} Results & Standings`,
+        text: `Gridiron Picks Weekly Results - Week ${targetWeek}\n\n` +
+              `Week Winner(s): ${winners.length ? winners.join(", ") : "None"}\n\n` +
+              `Leaderboard:\n${leaderboardText}`
+      })
     });
 
     const data = await res.json();
-    console.log('Email dispatch response:', data);
+    console.log("Email dispatch response:", data);
   } catch (err) {
-    console.error('Automation error:', err);
+    console.error("Automation error:", err);
     process.exit(1);
   }
 }
